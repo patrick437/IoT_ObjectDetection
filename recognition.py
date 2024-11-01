@@ -112,7 +112,7 @@ def draw_detections(request, stream="main"):
 
 if __name__ == "__main__":
 
-    model = "./imx500-models/imx500_network_yolov8n_pp.rpk"
+    model = "./imx500-models-backup/imx500_network_yolov8n_pp.rpk"
 
     # This must be called before instantiation of Picamera2
     imx500 = IMX500(model)
