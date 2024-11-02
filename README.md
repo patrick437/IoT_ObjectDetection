@@ -1,5 +1,7 @@
 # Raspberry PI AI Camera Sony IMX500 YoloV8 Object detection model
 
+[![Raspberry PI Ai Camera Sony IMX500 YoloV8](/images/rasbperry-py-ai-camera-yolo8-youtube.jpg)](https://www.youtube.com/watch?v=AGu9_UfNlNc)
+
 ## This is an example project of how to use YoloV8 model with Raspberry PI AI camera.
 
 To install dependencies run:
