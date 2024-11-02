@@ -1,3 +1,6 @@
+# Origin: 
+# https://github.com/raspberrypi/picamera2/blob/main/examples/imx500/imx500_object_detection_demo.py
+
 import sys
 from functools import lru_cache
 import cv2
@@ -117,18 +120,6 @@ if __name__ == "__main__":
     # This must be called before instantiation of Picamera2
     imx500 = IMX500(model)
     intrinsics = imx500.network_intrinsics
-    if not intrinsics:
-        intrinsics = NetworkIntrinsics()
-        intrinsics.task = "object detection"
-    elif intrinsics.task != "object detection":
-        print("Network is not an object detection task", file=sys.stderr)
-        exit()
-
-    # Defaults
-    if intrinsics.labels is None:
-        with open("assets/coco_labels.txt", "r") as f:
-            intrinsics.labels = f.read().splitlines()
-    intrinsics.update_with_defaults()
 
     picam2 = Picamera2(imx500.camera_num)
 
