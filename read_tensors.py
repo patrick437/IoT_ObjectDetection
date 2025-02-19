@@ -14,7 +14,7 @@ def read_and_analyze_tensors(folder_path):
         print("No tensor files found!")
         return
         
-     print("\n=== DETAILED STRUCTURE ===")
+    print("\n=== DETAILED STRUCTURE ===")
     for tensor_file in sorted(tensor_files):
         print(f"\n{'='*50}")
         print(f"File: {tensor_file.name}")
@@ -34,7 +34,7 @@ def read_and_analyze_tensors(folder_path):
         print(f"\nClasses array shape: {data['classes'].shape}")
         print("Classes data:")
         print(data['classes'])
-        
+"""
     print(f"Found {len(tensor_files)} tensor files")
     
     for tensor_file in sorted(tensor_files):
@@ -67,7 +67,7 @@ def read_and_analyze_tensors(folder_path):
         plt.show()
     except Exception as e:
         print(f"Error creating plot: {e}")
-
+"""
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         folder = sys.argv[1]
