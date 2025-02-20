@@ -10,6 +10,7 @@ import time
 
 from itkacher.date_utils import DateUtils
 from itkacher.file_utils import FileUtils
+from itkacher.video_recorder import VideoRecorder
 
 from picamera2 import MappedArray, Picamera2
 from picamera2.devices import IMX500
@@ -59,6 +60,19 @@ def parse_detections(metadata: dict):
         for box, score, category in zip(boxes, scores, classes)
         if score > threshold
     ]
+
+    # Add tensor saving here
+    try:
+        timestamp = DateUtils.get_time()
+        tensor_folder = f"./data/tensors/{DateUtils.get_date()}/"
+        tensor_outputs = [boxes, scores, classes]
+        
+        # Create VideoRecorder instance (if not already created)
+        video_recorder = VideoRecorder()
+        video_recorder.save_tensor_data(tensor_outputs, timestamp, tensor_folder)
+    except Exception as e:
+        print(f"Error saving tensor data: {e}")
+
     return last_detections
 
 
