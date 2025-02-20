@@ -14,6 +14,27 @@ def read_and_analyze_tensors(folder_path):
         print("No tensor files found!")
         return
         
+     print("\n=== DETAILED STRUCTURE ===")
+    for tensor_file in sorted(tensor_files):
+        print(f"\n{'='*50}")
+        print(f"File: {tensor_file.name}")
+        print(f"{'='*50}")
+        
+        data = np.load(tensor_file, allow_pickle=True)
+        
+        print("\nContents:")
+        print(f"\nBoxes array shape: {data['boxes'].shape}")
+        print("Boxes data:")
+        print(data['boxes'])
+        
+        print(f"\nScores array shape: {data['scores'].shape}")
+        print("Scores data:")
+        print(data['scores'])
+        
+        print(f"\nClasses array shape: {data['classes'].shape}")
+        print("Classes data:")
+        print(data['classes'])
+        
     print(f"Found {len(tensor_files)} tensor files")
     
     for tensor_file in sorted(tensor_files):
