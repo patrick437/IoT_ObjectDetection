@@ -129,36 +129,58 @@ def draw_detections(request, stream="main"):
 
 
 if __name__ == "__main__":
+    # Add argument parsing
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--save_tensors', action='store_true', help='Save tensor data')
+    parser.add_argument('--record_video', action='store_true', help='Record video from images')
+    args = parser.parse_args()
 
     model = "./imx500-models-backup/imx500_network_yolov8n_pp.rpk"
+
+    # Initialize video recorder if needed
+    video_recorder = VideoRecorder() if args.record_video else None
 
     # This must be called before instantiation of Picamera2
     imx500 = IMX500(model)
     intrinsics = imx500.network_intrinsics
 
-    picam2 = Picamera2(imx500.camera_num)
+    # Your existing setup code...
 
-    config = picam2.create_preview_configuration(
-        controls = {}, 
-        buffer_count=12
-    )
+    # Modify your main loop
+    image_count = 0
+    IMAGES_PER_VIDEO = 300  # Will create a 10-second video at 30fps
 
-    imx500.show_network_fw_progress_bar()
-    picam2.start(config, show_preview=False)
-
-    if intrinsics.preserve_aspect_ratio:
-        imx500.set_auto_aspect_ratio()
-
-    last_results = None
-    picam2.pre_callback = draw_detections
-    print("Started!")
-    labels = get_labels()
     while True:
         last_results = parse_detections(picam2.capture_metadata())
+        
         # Record file to SD card
         data_folder = f"./data/images/{DateUtils.get_date()}/"
         try:
-            picam2.capture_file(f"{data_folder}/{DateUtils.get_time()}.jpg")
+            # Save image
+            current_time = DateUtils.get_time()
+            image_path = f"{data_folder}/{current_time}.jpg"
+            picam2.capture_file(image_path)
+            image_count += 1
+
+            # Save tensors if enabled
+            if args.save_tensors and len(last_results) > 0:
+                tensor_folder = f"./data/tensors/{DateUtils.get_date()}/"
+                try:
+                    tensor_outputs = [boxes, scores, classes]  # Get these from your parse_detections
+                    video_recorder.save_tensor_data(tensor_outputs, current_time, tensor_folder)
+                except Exception as error:
+                    print(f"Error saving tensor data: {error}")
+
+            # Create video if enough frames collected
+            if args.record_video and image_count >= IMAGES_PER_VIDEO:
+                try:
+                    output_video = f"./data/videos/{DateUtils.get_date()}/video_{current_time}.mp4"
+                    os.makedirs(os.path.dirname(output_video), exist_ok=True)
+                    video_recorder.record_video(data_folder, output_video)
+                    image_count = 0  # Reset counter
+                except Exception as error:
+                    print(f"Error creating video: {error}")
+
         except:
             FileUtils.create_folders(data_folder)
 
