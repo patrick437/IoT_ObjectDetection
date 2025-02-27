@@ -1,0 +1,22 @@
+{
+  "Memory Report": {
+    "Name": "yolov8n_imx",
+    "Runtime Memory Physical Size": "5.27MB",
+    "Model Memory Physical Size": "2.48MB",
+    "Reserved Memory": "1.00KB",
+    "Memory Usage": "7.75MB",
+    "Total Memory Available On Chip": "8.00MB",
+    "Memory Utilization": "97%",
+    "Fit In Chip": true,
+    "Input Persistent": false,
+    "Networks": [
+      {
+        "Hash": "yolov8n_imx",
+        "Name": "yolov8n_imx",
+        "Runtime Memory Physical Size": "5.27MB",
+        "Model Memory Physical Size": "2.48MB",
+        "Input Persistence Cost": "0B"
+      }
+    ]
+  }
+}
