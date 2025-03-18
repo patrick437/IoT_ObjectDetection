@@ -1,0 +1,4 @@
+awsiotsdk
+numpy
+opencv-python
+picamera2
