@@ -8,6 +8,7 @@ import time
 import argparse
 import os
 import json
+from datetime import datetime
 
 from itkacher.date_utils import DateUtils
 from itkacher.file_utils import FileUtils
@@ -205,60 +206,13 @@ if __name__ == '__main__':
     # Future.result() waits until a result is available
     connect_future.result()
     print("Connected!")
-
-    message_count = cmdData.input_count
-    message_topic = cmdData.input_topic
-    message_string = cmdData.input_message
-
-    # Subscribe
-    print("Subscribing to topic '{}'...".format(message_topic))
-    subscribe_future, packet_id = mqtt_connection.subscribe(
-        topic=message_topic,
-        qos=mqtt.QoS.AT_LEAST_ONCE,
-        callback=on_message_received)
-
-    subscribe_result = subscribe_future.result()
-    print("Subscribed with {}".format(str(subscribe_result['qos'])))
-
-    # Publish message to server desired number of times.
-    # This step is skipped if message is blank.
-    # This step loops forever if count was set to 0.
-    if message_string:
-        if message_count == 0:
-            print("Sending messages until program killed")
-        else:
-            print("Sending {} message(s)".format(message_count))
-
-        publish_count = 1
-        while (publish_count <= message_count) or (message_count == 0):
-            message = "{} [{}]".format(message_string, publish_count)
-            print("Publishing message to topic '{}': {}".format(message_topic, message))
-            message_json = json.dumps(message)
-            mqtt_connection.publish(
-                topic=message_topic,
-                payload=message_json,
-                qos=mqtt.QoS.AT_LEAST_ONCE)
-            time.sleep(1)
-            publish_count += 1
-
-    # Wait for all messages to be received.
-    # This waits forever if count was set to 0.
-    if message_count != 0 and not received_all_event.is_set():
-        print("Waiting for all messages to be received...")
-
-    received_all_event.wait()
-    print("{} message(s) received.".format(received_count))
-
-    # Disconnect
-    print("Disconnecting...")
-    disconnect_future = mqtt_connection.disconnect()
-    disconnect_future.result()
-    print("Disconnected!")
-
     
+    # Configure message topic from command line
+    message_topic = cmdData.input_topic
+    
+    # Load the model
     model = "./imx500-models-backup/imx500_network_yolov8n_pp.rpk"
     
-
     # This must be called before instantiation of Picamera2
     imx500 = IMX500(model)
     intrinsics = imx500.network_intrinsics
@@ -279,21 +233,79 @@ if __name__ == '__main__':
     print("Started!")
     labels = get_labels()
 
-    # Modify your main loop
-    image_count = 0
-    IMAGES_PER_VIDEO = 300  # Will create a 10-second video at 30fps
+    # Create necessary folders with proper permissions
+    data_folder = f"./data/images/{DateUtils.get_date()}/"
+    try:
+        # Use sudo or run script as root to avoid permission issues
+        FileUtils.create_folders(data_folder)
+    except PermissionError:
+        print(f"Permission error creating {data_folder}. Consider running with sudo.")
+        # Try to continue without image saving
+        data_folder = None
 
+    # Main loop for object detection and publishing to AWS
     while True:
+        # Capture metadata and parse detections
         last_results = parse_detections(picam2.capture_metadata())
+        
+        # Save image if folder was created successfully
+        if data_folder:
+            # Define image_path (this fixes the NameError)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+            image_path = f"{data_folder}image_{timestamp}.jpg"
+            try:
+                picam2.capture_file(image_path)
+            except Exception as e:
+                print(f"Error saving image: {e}")
 
-        # Record file to SD card
-        data_folder = f"./data/images/{DateUtils.get_date()}/"
-        try:
-            picam2.capture_file(image_path)
-        except:
-            FileUtils.create_folders(data_folder)
-
-        if (len(last_results) > 0):
+        if len(last_results) > 0:
             for result in last_results:
-                label = f"{labels[int(result.category)]} ({result.conf:.2f})"
-                print(f"Detected {label}")
+                label = f"{labels[int(result.category)]}"
+                
+                # Convert NumPy float32 to native Python float
+                confidence = float(result.conf)
+                confidence = round(confidence, 2)
+                
+                timestamp = datetime.now().isoformat()
+                
+                # Create JSON payload
+                detection_payload = {
+                    "timestamp": timestamp,
+                    "object": label,
+                    "confidence": confidence,
+                    "device_id": cmdData.input_clientId
+                }
+                
+                # Custom JSON encoder to handle NumPy types
+                def convert_to_json_serializable(obj):
+                    if isinstance(obj, np.integer):
+                        return int(obj)
+                    elif isinstance(obj, np.floating):
+                        return float(obj)
+                    elif isinstance(obj, np.ndarray):
+                        return obj.tolist()
+                    else:
+                        return obj
+                
+                # Convert to JSON and publish
+                detection_json = json.dumps(detection_payload, default=convert_to_json_serializable)
+                print(f"Publishing detection to topic '{message_topic}': {detection_json}")
+                
+                try:
+                    mqtt_connection.publish(
+                        topic=message_topic,
+                        payload=detection_json,
+                        qos=mqtt.QoS.AT_LEAST_ONCE)
+                except Exception as e:
+                    print(f"Error publishing to AWS: {e}")
+                
+                # Print to console as well
+                print(f"Detected {label} with confidence {confidence}")
+                # Add a small delay to avoid maxing out CPU
+                time.sleep(0.1)
+
+    # Disconnect (this part will likely never be reached in this implementation)
+    print("Disconnecting...")
+    disconnect_future = mqtt_connection.disconnect()
+    disconnect_future.result()
+    print("Disconnected!")
