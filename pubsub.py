@@ -122,11 +122,22 @@ def parse_detections(metadata: dict):
 
 @lru_cache
 def get_labels():
-    labels = intrinsics.labels
-
-    if intrinsics.ignore_dash_labels:
-        labels = [label for label in labels if label and label != "-"]
-    return labels
+    # Check if intrinsics is available and has labels
+    if intrinsics is None:
+        # Fallback: Read labels from a file if intrinsics is not available
+        try:
+            with open("/home/patrick/IoT_ObjectDetection/labels.txt", "r") as f:
+                labels = [line.strip() for line in f.readlines()]
+            return [label for label in labels if label and label != "-"]
+        except FileNotFoundError:
+            print("Warning: Neither intrinsics nor labels.txt found")
+            return ["unknown"]  # Default fallback
+    else:
+        # Use intrinsics if available
+        labels = intrinsics.labels
+        if hasattr(intrinsics, 'ignore_dash_labels') and intrinsics.ignore_dash_labels:
+            labels = [label for label in labels if label and label != "-"]
+        return labels
 
 def draw_detections(request, stream="main"):
     """Draw the detections for this request onto the ISP output."""
@@ -211,7 +222,7 @@ if __name__ == '__main__':
     message_topic = cmdData.input_topic
     
     # Load the model
-    model = "./imx500-models-backup/imx500_network_yolov8n_pp.rpk"
+    model = "network.rpk"
     
     # This must be called before instantiation of Picamera2
     imx500 = IMX500(model)
