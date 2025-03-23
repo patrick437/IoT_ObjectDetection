@@ -33,6 +33,7 @@ iou = 0.65
 max_detections = 10
 received_count = 0
 received_all_event = threading.Event()
+last_detections = []
 
 def on_connection_interrupted(connection, error, **kwargs):
     print("Connection interrupted. error: {}".format(error))
@@ -91,8 +92,12 @@ class Detection:
         
 def parse_detections(metadata: dict):
     """Parse the output tensor into a number of detected objects, scaled to the ISP out."""
-    global last_detections
+    global last_detections, intrinsics
     bbox_normalization = intrinsics.bbox_normalization
+    bbox_order = intrinsics.bbox_order
+    threshold = 0.1 # Fixed value instead of args.threshold
+    iou = 0.65  # Fixed value instead of args.iou
+    max_detections = 10  # Fixed value instead of args.max_detections
 
     np_outputs = imx500.get_outputs(metadata, add_batch=True)
     input_w, input_h = imx500.get_input_size()
@@ -110,7 +115,7 @@ def parse_detections(metadata: dict):
             boxes = boxes / input_h
 
         boxes = np.array_split(boxes, 4, axis=1)
-        boxes = zip(*boxes)
+        boxes = list(zip(*boxes))  # Convert zip to list
 
     last_detections = [
         Detection(box, category, score, metadata)
@@ -227,6 +232,29 @@ if __name__ == '__main__':
     # This must be called before instantiation of Picamera2
     imx500 = IMX500(model)
     intrinsics = imx500.network_intrinsics
+    if not intrinsics:
+        intrinsics = NetworkIntrinsics()
+        intrinsics.task = "object detection"
+    elif intrinsics.task != "object detection":
+        print("Network is not an object detection task", file=sys.stderr)
+        exit()
+        
+    intrinsics.bbox_normalization = True  # From --bbox-normalization flag
+    intrinsics.bbox_order = "xy"  # From --bbox-order xy flag
+    intrinsics.ignore_dash_labels = True  # From --ignore-dash-labels flag
+
+
+    # Set labels from file
+    labels_path = "/home/patrick/Downloads/best_imx_model/labels.txt"
+    try:
+        with open(labels_path, 'r') as f:
+            intrinsics.labels = f.read().splitlines()
+        print(f"Loaded {len(intrinsics.labels)} labels from {labels_path}")
+    except Exception as e:
+        print(f"Error loading labels: {e}")
+        # Create a minimal set of default labels to prevent crashes
+        intrinsics.labels = ["object"]
+        print("Using basic default label")
 
     # Initialize the camera
     picam2 = Picamera2(imx500.camera_num)
@@ -241,6 +269,7 @@ if __name__ == '__main__':
 
     last_results = None
     picam2.pre_callback = draw_detections
+    last_results = parse_detections(picam2.capture_metadata())
     print("Started!")
     labels = get_labels()
 
