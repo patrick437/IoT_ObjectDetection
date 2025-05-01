@@ -118,44 +118,195 @@ def warm_up_camera():
     print("Warm-up complete")
 
 def parse_detections(metadata: dict):
-    """Parse the output tensor into detected objects."""
+    """Parse the output tensor with detailed tensor debugging."""
     global last_detections
     
     # Get model outputs - this can return None and that's OK
     np_outputs = imx500.get_outputs(metadata, add_batch=True)
     if np_outputs is None:
-        # Simply return previous detections without printing error message
+        print("No outputs received from model in this frame")
         return last_detections
     
-    input_w, input_h = imx500.get_input_size()
+    print("\n----- TENSOR DEBUG OUTPUT -----")
+    print(f"Number of output tensors: {len(np_outputs)}")
     
-    # Get safely with default values
-    bbox_normalization = getattr(intrinsics, 'bbox_normalization', False)
+    # Examine each output tensor
+    for i, output in enumerate(np_outputs):
+        print(f"\nOUTPUT TENSOR {i}:")
+        print(f"  Shape: {output.shape}")
+        print(f"  Data type: {output.dtype}")
+        print(f"  Min value: {np.min(output)}")
+        print(f"  Max value: {np.max(output)}")
+        
+        # For the first batch, print more detailed info
+        if i == 0 and len(output) > 0:
+            print("\n  First batch details:")
+            
+            # Print shape of first batch
+            print(f"    First batch shape: {output[0].shape}")
+            
+            # For classification-like outputs (class probabilities)
+            if len(output[0].shape) == 1 or (len(output[0].shape) == 2 and output[0].shape[1] < 100):
+                print(f"    First batch values: {output[0]}")
+            
+            # For detection-like outputs (boxes)
+            elif len(output[0].shape) == 2:
+                print(f"    Number of detections: {output[0].shape[0]}")
+                
+                # Print first few detections in detail
+                num_to_print = min(3, output[0].shape[0])
+                for j in range(num_to_print):
+                    print(f"    Detection {j}:")
+                    detection = output[0][j]
+                    print(f"      Values: {detection}")
+                    
+                    # If it looks like YOLOv8 format (at least 5 values: 4 for box + 1 for confidence)
+                    if len(detection) >= 5:
+                        print(f"      Possible box coords (first 4): {detection[:4]}")
+                        print(f"      Possible confidence (5th): {detection[4]}")
+                        
+                        # If we have more values, they could be class probabilities
+                        if len(detection) > 5:
+                            class_id = np.argmax(detection[5:])
+                            class_conf = detection[5 + class_id]
+                            print(f"      Most probable class: {class_id} with confidence {class_conf}")
     
-    # Process outputs based on model type
-    if hasattr(intrinsics, 'postprocess') and intrinsics.postprocess == "nanodet":
-        boxes, scores, classes = \
-            postprocess_nanodet_detection(outputs=np_outputs[0], conf=threshold, iou_thres=iou,
-                                        max_out_dets=max_detections)[0]
-        from picamera2.devices.imx500.postprocess import scale_boxes
-        boxes = scale_boxes(boxes, 1, 1, input_h, input_w, False, False)
-    else:
-        boxes, scores, classes = np_outputs[0][0], np_outputs[1][0], np_outputs[2][0]
-        if bbox_normalization:
-            boxes = boxes / input_h
+    print("----- END TENSOR DEBUG -----\n")
+    
+    # Continue with the regular processing
+    try:
+        # Get frame dimensions for scaling reference
+        frame_w, frame_h = 640, 480  # Default, update if you know the actual size
+        if hasattr(picam2, 'camera_config') and picam2.camera_config:
+            if 'main' in picam2.camera_config and 'size' in picam2.camera_config['main']:
+                frame_w, frame_h = picam2.camera_config['main']['size']
+        print(f"Frame dimensions: {frame_w}x{frame_h}")
+        
+        # Process outputs based on model type
+        if hasattr(intrinsics, 'postprocess') and intrinsics.postprocess == "nanodet":
+            boxes, scores, classes = \
+                postprocess_nanodet_detection(outputs=np_outputs[0], conf=threshold, iou_thres=iou,
+                                            max_out_dets=max_detections)[0]
+            from picamera2.devices.imx500.postprocess import scale_boxes
+            input_w, input_h = imx500.get_input_size()
+            boxes = scale_boxes(boxes, 1, 1, input_h, input_w, False, False)
+        else:
+            # Check if it looks like YOLOv8 format based on the debug info we printed
+            yolo_format = False
+            if len(np_outputs) == 1 and len(np_outputs[0]) > 0 and len(np_outputs[0][0]) > 0:
+                first_detection = np_outputs[0][0][0]
+                if len(first_detection) >= 5:  # YOLOv8 has at least 5 values per detection
+                    yolo_format = True
+                    print("Detected YOLOv8 format output")
+            
+            if yolo_format:
+                # Process as YOLOv8 output
+                yolo_outputs = np_outputs[0][0]  # Take the first batch
+                
+                # Extract boxes, confidence scores, and class IDs
+                processed_boxes = []
+                processed_scores = []
+                processed_classes = []
+                
+                # Process each detection
+                for detection in yolo_outputs:
+                    if len(detection) >= 5:  # Ensure we have at least coordinates + objectness
+                        # Extract coordinates (typically first 4 values)
+                        x_center, y_center, width, height = detection[0:4]
+                        
+                        # Check coordinate range and scale if needed
+                        coordinate_info = f"Original: center=({x_center}, {y_center}), size=({width}, {height})"
+                        
+                        # Scale down very large values
+                        if abs(x_center) > 1000 or abs(y_center) > 1000:
+                            # Try different scaling factors based on the magnitude
+                            if abs(x_center) > 10000 or abs(y_center) > 10000:
+                                scaling_factor = 10000
+                            else:
+                                scaling_factor = 1000
+                                
+                            x_center /= scaling_factor
+                            y_center /= scaling_factor
+                            width /= scaling_factor
+                            height /= scaling_factor
+                            coordinate_info += f" → Scaled by 1/{scaling_factor}: center=({x_center}, {y_center}), size=({width}, {height})"
+                        
+                        # Convert from center coordinates to top-left corner
+                        x = max(0, x_center - width / 2)
+                        y = max(0, y_center - height / 2)
+                        
+                        # Ensure width and height are positive
+                        w = max(1, width)
+                        h = max(1, height)
+                        
+                        coordinate_info += f" → Final: x={x}, y={y}, w={w}, h={h}"
+                        print(coordinate_info)
+                        
+                        # Objectness score is typically the 5th value
+                        confidence = detection[4]
+                        
+                        # Find the class with highest probability
+                        if len(detection) > 5:
+                            class_scores = detection[5:]
+                            class_id = np.argmax(class_scores)
+                            class_score = class_scores[class_id]
+                            # Combine objectness and class score
+                            final_score = confidence * class_score
+                        else:
+                            class_id = 0  # Default to first class
+                            final_score = confidence
+                        
+                        # Only keep detections above threshold
+                        if final_score >= threshold:
+                            processed_boxes.append((x, y, w, h))
+                            processed_scores.append(final_score)
+                            processed_classes.append(class_id)
+                            print(f"Kept detection: class={class_id}, score={final_score:.4f}")
+                
+                # Use the processed detections
+                boxes = processed_boxes
+                scores = processed_scores
+                classes = processed_classes
+                
+                print(f"Processed {len(boxes)} valid YOLOv8 detections")
+            else:
+                # Standard processing as before
+                print("Using standard processing")
+                boxes, scores, classes = np_outputs[0][0], np_outputs[1][0], np_outputs[2][0]
+                
+                # Get safely with default values
+                bbox_normalization = getattr(intrinsics, 'bbox_normalization', False)
+                bbox_order = getattr(intrinsics, 'bbox_order', 'yx')
+                
+                if bbox_normalization:
+                    input_w, input_h = imx500.get_input_size()
+                    boxes = boxes / input_h
+                
+                # Add the bbox_order handling
+                if bbox_order == "xy":
+                    boxes = boxes[:, [1, 0, 3, 2]]
+                
+                boxes = np.array_split(boxes, 4, axis=1)
+                boxes = list(zip(*boxes))  # Convert to list to avoid depletion
 
-        boxes = np.array_split(boxes, 4, axis=1)
-        boxes = list(zip(*boxes))  # Convert to list to avoid depletion
-
-    # Create detection objects
-    last_detections = [
-        Detection(box, category, score, metadata)
-        for box, score, category in zip(boxes, scores, classes)
-        if score > threshold
-    ]
+        # Create detection objects
+        last_detections = [
+            Detection(box, category, score, metadata)
+            for box, score, category in zip(boxes, scores, classes)
+            if score > threshold
+        ]
+        
+        if last_detections:
+            print(f"Created {len(last_detections)} Detection objects")
+            
+            # Print the first few Detection objects to verify
+            for i, det in enumerate(last_detections[:3]):
+                print(f"Detection {i}: box={det.box}, class={det.category}, conf={det.conf:.4f}")
     
-    if last_detections:
-        print(f"Detected {len(last_detections)} objects")
+    except Exception as e:
+        print(f"Error in parse_detections: {e}")
+        import traceback
+        traceback.print_exc()
     
     # Save tensor data if enabled
     if args.save_tensors and len(last_detections) > 0:
