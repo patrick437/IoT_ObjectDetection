@@ -3,10 +3,12 @@
 # BSD 2-Clause License. For additional information read: LICENCE-Raspberry-PI
 
 import sys
+import argparse
 from functools import lru_cache
 import cv2
 import numpy as np
 import time
+import os
 
 from itkacher.date_utils import DateUtils
 from itkacher.file_utils import FileUtils
@@ -144,47 +146,89 @@ if __name__ == "__main__":
     imx500 = IMX500(model)
     intrinsics = imx500.network_intrinsics
 
+    # Initialize the Picamera2 object
+    picam2 = Picamera2()
+    
+    # Configure the camera
+    camera_config = picam2.create_preview_configuration(
+        main={"size": imx500.get_output_size()},
+        transform=imx500.get_transform(),
+        buffer_count=4
+    )
+    picam2.configure(camera_config)
+    
+    # Set up camera metadata
+    picam2.post_callback = imx500.post_callback
+    
+    # Start the camera
+    picam2.start()
+    
+    # Allow time for camera to initialize
+    time.sleep(2)
+    
+    # Get the labels
+    labels = get_labels()
+
     # Your existing setup code...
 
     # Modify your main loop
     image_count = 0
     IMAGES_PER_VIDEO = 300  # Will create a 10-second video at 30fps
 
-    while True:
-        last_results = parse_detections(picam2.capture_metadata())
-        
-        # Record file to SD card
-        data_folder = f"./data/images/{DateUtils.get_date()}/"
-        try:
-            # Save image
-            current_time = DateUtils.get_time()
-            image_path = f"{data_folder}/{current_time}.jpg"
-            picam2.capture_file(image_path)
-            image_count += 1
+    try:
+        while True:
+            last_results = parse_detections(picam2.capture_metadata())
+            
+            # Record file to SD card
+            data_folder = f"./data/images/{DateUtils.get_date()}/"
+            try:
+                # Ensure the folder exists
+                FileUtils.create_folders(data_folder)
+                
+                # Save image
+                current_time = DateUtils.get_time()
+                image_path = f"{data_folder}/{current_time}.jpg"
+                picam2.capture_file(image_path)
+                image_count += 1
 
-            # Save tensors if enabled
-            if args.save_tensors and len(last_results) > 0:
-                tensor_folder = f"./data/tensors/{DateUtils.get_date()}/"
-                try:
-                    tensor_outputs = [boxes, scores, classes]  # Get these from your parse_detections
-                    video_recorder.save_tensor_data(tensor_outputs, current_time, tensor_folder)
-                except Exception as error:
-                    print(f"Error saving tensor data: {error}")
+                # Save tensors if enabled
+                if args.save_tensors and len(last_results) > 0:
+                    tensor_folder = f"./data/tensors/{DateUtils.get_date()}/"
+                    FileUtils.create_folders(tensor_folder)
+                    try:
+                        # Use the tensor outputs from the last detection
+                        if 'boxes' in locals() and 'scores' in locals() and 'classes' in locals():
+                            tensor_outputs = [boxes, scores, classes]
+                            video_recorder.save_tensor_data(tensor_outputs, current_time, tensor_folder)
+                    except Exception as error:
+                        print(f"Error saving tensor data: {error}")
 
-            # Create video if enough frames collected
-            if args.record_video and image_count >= IMAGES_PER_VIDEO:
-                try:
-                    output_video = f"./data/videos/{DateUtils.get_date()}/video_{current_time}.mp4"
-                    os.makedirs(os.path.dirname(output_video), exist_ok=True)
-                    video_recorder.record_video(data_folder, output_video)
-                    image_count = 0  # Reset counter
-                except Exception as error:
-                    print(f"Error creating video: {error}")
+                # Create video if enough frames collected
+                if args.record_video and image_count >= IMAGES_PER_VIDEO:
+                    try:
+                        video_folder = f"./data/videos/{DateUtils.get_date()}/"
+                        FileUtils.create_folders(video_folder)
+                        output_video = f"{video_folder}/video_{current_time}.mp4"
+                        video_recorder.record_video(data_folder, output_video)
+                        image_count = 0  # Reset counter
+                    except Exception as error:
+                        print(f"Error creating video: {error}")
 
-        except:
-            FileUtils.create_folders(data_folder)
+            except Exception as e:
+                print(f"Error in main loop: {e}")
+                FileUtils.create_folders(data_folder)
 
-        if (len(last_results) > 0):
-            for result in last_results:
-                label = f"{labels[int(result.category)]} ({result.conf:.2f})"
-                print(f"Detected {label}")
+            if (len(last_results) > 0):
+                for result in last_results:
+                    label = f"{labels[int(result.category)]} ({result.conf:.2f})"
+                    print(f"Detected {label}")
+            
+            # Optional: add a small delay to reduce CPU usage
+            time.sleep(0.01)
+            
+    except KeyboardInterrupt:
+        print("Program terminated by user")
+    finally:
+        # Clean up
+        picam2.stop()
+        print("Camera stopped and resources released")
