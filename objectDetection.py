@@ -1,11 +1,16 @@
 import sys
+import os
+import time
 import argparse
-from functools import lru_cache
 import cv2
 import numpy as np
-import time
-import os
+from functools import lru_cache
 import datetime
+
+# Import IMX500 Camera modules
+from picamera2 import MappedArray, Picamera2
+from picamera2.devices import IMX500
+from picamera2.devices.imx500 import (NetworkIntrinsics, postprocess_nanodet_detection)
 
 # Simple utility classes (instead of itkacher imports)
 class DateUtils:
@@ -31,6 +36,7 @@ class VideoRecorder:
     """Simple implementation of VideoRecorder"""
     def __init__(self):
         self.frame_buffer = []
+        self.saved_images = []
     
     def save_tensor_data(self, tensor_outputs, timestamp, tensor_folder):
         """Save tensor data to file"""
@@ -43,6 +49,10 @@ class VideoRecorder:
         except Exception as e:
             print(f"Error saving tensor data: {e}")
     
+    def process_image(self, image_path):
+        """Add image to the list of saved images"""
+        self.saved_images.append(image_path)
+        
     def record_video(self, image_folder, output_video, fps=30):
         """Create a video from images in a folder"""
         try:
@@ -82,11 +92,6 @@ class VideoRecorder:
             print(f"Error creating video: {e}")
             return False
 
-# Import IMX500 Camera modules
-from picamera2 import MappedArray, Picamera2
-from picamera2.devices import IMX500
-from picamera2.devices.imx500 import (NetworkIntrinsics, postprocess_nanodet_detection)
-
 # Detection parameters
 last_detections = []
 threshold = 0.55
@@ -100,272 +105,275 @@ class Detection:
         self.conf = conf
         self.box = imx500.convert_inference_coords(coords, metadata, picam2)
 
+def warm_up_camera():
+    """Warm up the camera and model by capturing a few frames"""
+    print("Warming up camera and model...")
+    for i in range(3):  # Capture 3 warm-up frames
+        frame = picam2.capture_array()
+        metadata = picam2.capture_metadata()
+        # Try to get outputs but don't process them yet
+        outputs = imx500.get_outputs(metadata, add_batch=True)
+        print(f"Warm-up frame {i+1}: {'outputs received' if outputs is not None else 'no outputs'}")
+        time.sleep(0.5)
+    print("Warm-up complete")
 
 def parse_detections(metadata: dict):
-    """Parse the output tensor into a number of detected objects, scaled to the ISP out."""
+    """Parse the output tensor into detected objects, with better error handling."""
     global last_detections
+    global intrinsics
     
-    # Get safely with default values
+    # Handle None intrinsics
+    if intrinsics is None:
+        print("WARNING: intrinsics is None, cannot parse detections")
+        return last_detections
+    
+    # Safely get attributes with default values
     bbox_normalization = getattr(intrinsics, 'bbox_normalization', False)
+    bbox_order = getattr(intrinsics, 'bbox_order', 'yx')
     
-    # This part is important: np_outputs can be None, and that's OK
+    # Get model outputs - this can return None and that's OK
     np_outputs = imx500.get_outputs(metadata, add_batch=True)
     if np_outputs is None:
-        # Simply return the previous detections without error messages
+        # Simply return previous detections without printing error message
         return last_detections
-        
+    
     input_w, input_h = imx500.get_input_size()
     
-    # Process outputs based on model type
-    if hasattr(intrinsics, 'postprocess') and intrinsics.postprocess == "nanodet":
-        boxes, scores, classes = \
-            postprocess_nanodet_detection(outputs=np_outputs[0], conf=threshold, iou_thres=iou,
-                                          max_out_dets=max_detections)[0]
-        from picamera2.devices.imx500.postprocess import scale_boxes
-        boxes = scale_boxes(boxes, 1, 1, input_h, input_w, False, False)
-    else:
-        boxes, scores, classes = np_outputs[0][0], np_outputs[1][0], np_outputs[2][0]
-        if bbox_normalization:
-            boxes = boxes / input_h
+    # Handle different postprocessing methods
+    try:
+        if hasattr(intrinsics, 'postprocess') and intrinsics.postprocess == "nanodet":
+            boxes, scores, classes = \
+                postprocess_nanodet_detection(outputs=np_outputs[0], conf=threshold, iou_thres=iou,
+                                            max_out_dets=max_detections)[0]
+            from picamera2.devices.imx500.postprocess import scale_boxes
+            boxes = scale_boxes(boxes, 1, 1, input_h, input_w, False, False)
+        else:
+            # Standard processing
+            boxes, scores, classes = np_outputs[0][0], np_outputs[1][0], np_outputs[2][0]
+            if bbox_normalization:
+                boxes = boxes / input_h
 
-        boxes = np.array_split(boxes, 4, axis=1)
-        boxes = zip(*boxes)
+            # Add the bbox_order handling
+            if bbox_order == "xy":
+                boxes = boxes[:, [1, 0, 3, 2]]
 
-    # Create detection objects for items above threshold
-    last_detections = [
-        Detection(box, category, score, metadata)
-        for box, score, category in zip(boxes, scores, classes)
-        if score > threshold
-    ]
+            boxes = np.array_split(boxes, 4, axis=1)
+            boxes = list(zip(*boxes))  # Convert to list to avoid depletion
 
-    # If you want to save tensor data, keep this
-    if args.save_tensors and len(last_detections) > 0:
-        try:
-            timestamp = DateUtils.get_time()
-            tensor_folder = f"./data/tensors/{DateUtils.get_date()}/"
-            FileUtils.create_folders(tensor_folder)
-            tensor_outputs = [boxes, scores, classes]
-            
-            if video_recorder:
-                video_recorder.save_tensor_data(tensor_outputs, timestamp, tensor_folder)
-        except Exception as e:
-            print(f"Error saving tensor data: {e}")
-
-    return last_detections
-
+        # Create detection objects
+        last_detections = [
+            Detection(box, category, score, metadata)
+            for box, score, category in zip(boxes, scores, classes)
+            if score > threshold
+        ]
+        
+        if last_detections:
+            print(f"Detected {len(last_detections)} objects")
+        
+        # Save tensor data if enabled
+        if args.save_tensors and len(last_detections) > 0:
+            try:
+                timestamp = DateUtils.get_time()
+                tensor_folder = f"./data/tensors/{DateUtils.get_date()}/"
+                FileUtils.create_folders(tensor_folder)
+                tensor_outputs = [boxes, scores, classes]
+                
+                if video_recorder:
+                    video_recorder.save_tensor_data(tensor_outputs, timestamp, tensor_folder)
+            except Exception as e:
+                print(f"Error saving tensor data: {e}")
+        
+        return last_detections
+    
+    except Exception as e:
+        print(f"Error in parse_detections: {e}")
+        import traceback
+        traceback.print_exc()
+        return last_detections
 
 @lru_cache
 def get_labels():
-    """Get labels for detection categories"""
+    """Get model labels with better error handling"""
+    global intrinsics
+    
+    if intrinsics is None:
+        print("WARNING: intrinsics is None, returning default labels")
+        return ["object"]  # Default label
+        
+    if not hasattr(intrinsics, 'labels'):
+        print("WARNING: intrinsics has no 'labels' attribute, returning default labels")
+        return ["object"]  # Default label
+    
     labels = intrinsics.labels
-
-    if intrinsics.ignore_dash_labels:
+    if hasattr(intrinsics, 'ignore_dash_labels') and intrinsics.ignore_dash_labels:
         labels = [label for label in labels if label and label != "-"]
+    
     return labels
 
-
-def draw_detections(request, stream="main"):
-    """Draw the detections for this request onto the ISP output."""
-    detections = last_results
-    if detections is None:
-        return
+def draw_detections_on_frame(frame, detections):
+    """Draw the detections on the frame and return the modified frame"""
+    if detections is None or len(detections) == 0:
+        return frame
+    
     labels = get_labels()
-    with MappedArray(request, stream) as m:
-        for detection in detections:
+    frame_copy = frame.copy()
+    
+    for detection in detections:
+        try:
             x, y, w, h = detection.box
-            label = f"{labels[int(detection.category)]} ({detection.conf:.2f})"
+            
+            # Ensure label index is valid
+            label_idx = int(detection.category)
+            if 0 <= label_idx < len(labels):
+                label_text = labels[label_idx]
+            else:
+                label_text = "Unknown"
+                
+            label = f"{label_text} ({detection.conf:.2f})"
 
             # Calculate text size and position
             (text_width, text_height), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
             text_x = x + 5
             text_y = y + 15
 
-            # Create a copy of the array to draw the background with opacity
-            overlay = m.array.copy()
-
-            # Draw the background rectangle on the overlay
-            cv2.rectangle(overlay,
-                          (text_x, text_y - text_height),
-                          (text_x + text_width, text_y + baseline),
-                          (255, 255, 255),  # Background color (white)
-                          cv2.FILLED)
-
-            alpha = 0.30
-            cv2.addWeighted(overlay, alpha, m.array, 1 - alpha, 0, m.array)
+            # Draw the background rectangle
+            cv2.rectangle(frame_copy,
+                        (text_x, text_y - text_height),
+                        (text_x + text_width, text_y + baseline),
+                        (255, 255, 255),  # Background color (white)
+                        cv2.FILLED)
 
             # Draw text on top of the background
-            cv2.putText(m.array, label, (text_x, text_y),
+            cv2.putText(frame_copy, label, (text_x, text_y),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
 
             # Draw detection box
-            cv2.rectangle(m.array, (x, y), (x + w, y + h), (0, 255, 0, 0), thickness=2)
-
-        # Draw ROI if available
-        if hasattr(intrinsics, 'preserve_aspect_ratio') and intrinsics.preserve_aspect_ratio:
-            try:
-                b_x, b_y, b_w, b_h = imx500.get_roi_scaled(request)
-                color = (255, 0, 0)  # red
-                cv2.putText(m.array, "ROI", (b_x + 5, b_y + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-                cv2.rectangle(m.array, (b_x, b_y), (b_x + b_w, b_y + b_h), (255, 0, 0, 0))
-            except Exception as e:
-                print(f"Error drawing ROI: {e}")
-
-
-def draw_detections_on_frame(frame, detections):
-    """Draw the detections on a frame and return the modified frame"""
-    if not detections:
-        return frame
-        
-    labels = get_labels()
-    frame_copy = frame.copy()
-    
-    for detection in detections:
-        x, y, w, h = detection.box
-        label = f"{labels[int(detection.category)]} ({detection.conf:.2f})"
-
-        # Calculate text size and position
-        (text_width, text_height), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-        text_x = x + 5
-        text_y = y + 15
-
-        # Draw the background rectangle
-        cv2.rectangle(frame_copy,
-                     (text_x, text_y - text_height),
-                     (text_x + text_width, text_y + baseline),
-                     (255, 255, 255),  # Background color (white)
-                     cv2.FILLED)
-
-        # Draw text on top of the background
-        cv2.putText(frame_copy, label, (text_x, text_y),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-
-        # Draw detection box
-        cv2.rectangle(frame_copy, (x, y), (x + w, y + h), (0, 255, 0), thickness=2)
+            cv2.rectangle(frame_copy, (x, y), (x + w, y + h), (0, 255, 0), thickness=2)
+        except Exception as e:
+            print(f"Error drawing detection: {e}")
     
     return frame_copy
 
 
 if __name__ == "__main__":
-    # Add argument parsing
+    # Set up argument parsing
     parser = argparse.ArgumentParser()
     parser.add_argument('--save_tensors', action='store_true', help='Save tensor data')
     parser.add_argument('--record_video', action='store_true', help='Record video from images')
-    parser.add_argument('--display', action='store_true', help='Display video with detections')
-    parser.add_argument('--model', type=str, default="./imx500-models-backup/imx500_network_yolov8n_pp.rpk",
-                       help='Path to model file')
-    parser.add_argument('--video_delay', type=float, default=0.01,
-                       help='Delay between frames in seconds (default: 0.01)')
+    parser.add_argument('--model', type=str, default="traffic.rpk", 
+                       help='Path to the detection model')
+    parser.add_argument('--display', action='store_true', help='Display video with detections using cv2.imshow')
+    parser.add_argument('--display_every', type=int, default=10, 
+                       help='Display every N frames to reduce processing load (default: 10)')
+    parser.add_argument('--save_detections', action='store_true', help='Save images with detection boxes')
+    parser.add_argument('--fps', type=int, default=30, help='Frames per second for recorded videos')
     args = parser.parse_args()
 
-    # Set model path from arguments or use default
-    model = args.model
-
-    # Initialize video recorder if needed
-    video_recorder = VideoRecorder() if args.record_video else None
-
+    # Set the model path - you can override with --model argument
+    model = args.model if args.model else "traffic.rpk"
+    
     print(f"Using model: {model}")
     print(f"Model exists: {os.path.exists(model)}")
-
-    # This must be called before instantiation of Picamera2
-    try:
-        imx500 = IMX500(model)
-        intrinsics = imx500.network_intrinsics
-        print("IMX500 initialized successfully")
-    except Exception as e:
-        print(f"Error initializing IMX500: {e}")
-        sys.exit(1)
-        
-    # Check for labels.txt file in the same directory as the model
-    model_dir = os.path.dirname(model) if os.path.dirname(model) else "."
-    labels_file = os.path.join(model_dir, "labels.txt")
-    print(f"Looking for labels file at: {labels_file}")
     
-    if os.path.exists(labels_file):
-        try:
-            with open(labels_file, 'r') as f:
-                custom_labels = [line.strip() for line in f.readlines()]
-            
-            print(f"Found {len(custom_labels)} labels in {labels_file}: {custom_labels}")
+    # Initialize IMX500 with the model
+    imx500 = IMX500(model)
+    intrinsics = imx500.network_intrinsics
+    
+    # Create fallback intrinsics if needed
+    if intrinsics is None:
+        from picamera2.devices.imx500 import NetworkIntrinsics
+        intrinsics = NetworkIntrinsics()
+        intrinsics.task = "object detection"
+        intrinsics.bbox_normalization = False
+        intrinsics.labels = ["object"]  # Default label
+        intrinsics.ignore_dash_labels = False
+        intrinsics.bbox_order = "yx"
+        print("Created fallback intrinsics")
+    
+    # Check for labels.txt in the model directory
+    try:
+        model_dir = os.path.dirname(model) if os.path.dirname(model) else "."
+        labels_path = os.path.join(model_dir, "labels.txt")
+        
+        if os.path.exists(labels_path):
+            print(f"Found labels file: {labels_path}")
+            with open(labels_path, 'r') as f:
+                labels = [line.strip() for line in f.readlines()]
             
             # Set labels in intrinsics
-            intrinsics.labels = custom_labels
-        except Exception as e:
-            print(f"Error reading labels file: {e}")
-    else:
-        print(f"Labels file not found at {labels_file}, using default labels")
-        # If no labels file, check if intrinsics already has labels
-        if not hasattr(intrinsics, 'labels') or not intrinsics.labels:
-            # Set a default label for car detection if not already set
-            intrinsics.labels = ["car"]
-            print("Set default label to 'car'")
-
-
-    # Initialize the Picamera2 object
-    picam2 = Picamera2()
-    
-    # Configure the camera with proper error handling
-    try:
-        # Get the input size for the camera configuration
-        input_size = imx500.get_input_size()
-        print(f"Camera input size: {input_size}")
-        
-        # Check if get_transform exists
-        transform = None
-        if hasattr(imx500, 'get_transform'):
-            transform = imx500.get_transform()
-        
-        # Create the camera configuration
-        camera_config = picam2.create_preview_configuration(
-            main={"size": input_size},
-            transform=transform,
-            buffer_count=4
-        )
-        picam2.configure(camera_config)
-        
-        # Set up camera metadata
-        if hasattr(imx500, 'post_callback'):
-            picam2.post_callback = imx500.post_callback
-        else:
-            print("Warning: imx500.post_callback not found, skipping this step")
+            intrinsics.labels = labels
+            print(f"Loaded labels: {labels}")
     except Exception as e:
-        print(f"Error configuring camera: {e}")
-        # Fallback configuration if the specialized configuration fails
-        print("Attempting to use default camera configuration...")
-        default_config = picam2.create_preview_configuration()
-        picam2.configure(default_config)
-        print("Using default camera configuration.")
+        print(f"Error loading labels file: {e}")
+        # Default to generic label if there's any issue
+        intrinsics.labels = ["object"]
+    
+    # Initialize the camera
+    picam2 = Picamera2(imx500.camera_num)
+    config = picam2.create_preview_configuration(
+        controls = {},
+        buffer_count=12
+    )
+
+    # Show network firmware progress bar if available
+    if hasattr(imx500, 'show_network_fw_progress_bar'):
+        imx500.show_network_fw_progress_bar()
     
     # Start the camera
-    picam2.start()
+    picam2.start(config, show_preview=False)
     
-    # Allow time for camera to initialize
-    print("Waiting for camera to initialize...")
-    time.sleep(2)
+    # Warm up the camera and model
+    warm_up_camera()
     
-    # Get the labels
-    labels = get_labels()
-    print(f"Using label set: {labels}")
-
-    # Main loop variables
-    image_count = 0
+    # Initialize video recorder if needed
+    video_recorder = VideoRecorder() if args.record_video else None
+    
+    # Calculate frames per video based on duration
     IMAGES_PER_VIDEO = 300  # Will create a 10-second video at 30fps
-
+    
+    # Initialize frame counter for display
+    frame_count = 0
+    
     try:
         print("Starting object detection...")
         while True:
-            # Get detections - if this returns None, it's ok
-            last_results = parse_detections(picam2.capture_metadata())
+            # Capture frame
+            frame = picam2.capture_array()
+            frame_count += 1
             
-            # Capture frame for display/saving
-            if args.display or args.record_video:
-                frame = picam2.capture_array()
-                if args.display:
-                    annotated_frame = draw_detections_on_frame(frame, last_results)
-                    cv2.imshow("Object Detection", annotated_frame)
-                    if cv2.waitKey(1) & 0xFF == ord('q'):
-                        break
+            # Capture and parse detections
+            metadata = picam2.capture_metadata()
+            last_results = parse_detections(metadata)
             
-            # Record file to SD card
+            # Display frame if needed
+            if args.display and frame_count % args.display_every == 0:
+                display_frame = draw_detections_on_frame(frame, last_results)
+                cv2.imshow("Object Detection", display_frame)
+                
+                # Break loop if 'q' is pressed
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
+                    cv2.destroyAllWindows()
+                    print("Display closed by user")
+                    break
+            
+            # Print detected objects
+            if last_results and len(last_results) > 0:
+                labels = get_labels()
+                for result in last_results:
+                    try:
+                        label_idx = int(result.category)
+                        if 0 <= label_idx < len(labels):
+                            label_text = labels[label_idx]
+                        else:
+                            label_text = "Unknown"
+                        
+                        confidence = result.conf
+                        print(f"Detected {label_text} with confidence {confidence:.2f}")
+                    except Exception as e:
+                        print(f"Error printing detection: {e}")
+            
+            # Record image to SD card
             data_folder = f"./data/images/{DateUtils.get_date()}/"
             try:
                 # Ensure the folder exists
@@ -375,49 +383,70 @@ if __name__ == "__main__":
                 current_time = DateUtils.get_time()
                 image_path = f"{data_folder}/{current_time}.jpg"
                 
-                if args.record_video and args.display:
+                if args.display:
                     # Save the annotated frame
+                    annotated_frame = draw_detections_on_frame(frame, last_results)
                     cv2.imwrite(image_path, annotated_frame)
                 else:
                     # Save the raw camera frame
                     picam2.capture_file(image_path)
+                
+                # Process the image for video if recording is enabled
+                if args.record_video and video_recorder:
+                    video_recorder.process_image(image_path)
                     
-                image_count += 1
-
-                # Create video if enough frames collected
-                if args.record_video and image_count >= IMAGES_PER_VIDEO and video_recorder:
-                    try:
-                        video_folder = f"./data/videos/{DateUtils.get_date()}/"
-                        FileUtils.create_folders(video_folder)
-                        output_video = f"{video_folder}/video_{current_time}.mp4"
-                        video_recorder.record_video(data_folder, output_video)
-                        image_count = 0  # Reset counter
-                        
-                        # Optionally clean up the images folder after making the video
-                        for file in os.listdir(data_folder):
-                            if file.endswith('.jpg'):
-                                os.remove(os.path.join(data_folder, file))
-                    except Exception as error:
-                        print(f"Error creating video: {error}")
+                    # Create video if enough frames collected
+                    if len(video_recorder.saved_images) >= IMAGES_PER_VIDEO:
+                        try:
+                            video_folder = f"./data/videos/{DateUtils.get_date()}/"
+                            FileUtils.create_folders(video_folder)
+                            output_video = f"{video_folder}/video_{current_time}.mp4"
+                            video_recorder.record_video(data_folder, output_video, args.fps)
+                            
+                            # Reset saved images
+                            video_recorder.saved_images = []
+                            
+                            # Optionally clear the images folder
+                            for file in os.listdir(data_folder):
+                                try:
+                                    if file.endswith('.jpg'):
+                                        os.remove(os.path.join(data_folder, file))
+                                except Exception as e:
+                                    print(f"Error deleting file: {e}")
+                        except Exception as e:
+                            print(f"Error creating video: {e}")
 
             except Exception as e:
                 print(f"Error in main loop: {e}")
                 FileUtils.create_folders(data_folder)
 
-            # Print detected objects
-            if last_results and len(last_results) > 0:
-                for result in last_results:
-                    label = f"{labels[int(result.category)]} ({result.conf:.2f})"
-                    print(f"Detected {label}")
+            # Save detections if enabled
+            if args.save_detections and last_results:
+                # Create folder if it doesn't exist
+                detections_folder = f"./data/detections/{DateUtils.get_date()}/"
+                FileUtils.create_folders(detections_folder)
+                
+                # Save the annotated frame
+                annotated_frame = draw_detections_on_frame(frame, last_results)
+                detection_path = f"{detections_folder}/{DateUtils.get_time()}_annotated.jpg"
+                cv2.imwrite(detection_path, annotated_frame)
+                print(f"Saved annotated frame to {detection_path}")
             
-            # Add delay to reduce CPU usage
-            time.sleep(args.video_delay)
+            # Delay between frames
+            time.sleep(0.1)  # Small delay to reduce CPU usage
             
     except KeyboardInterrupt:
         print("Program terminated by user")
+        cv2.destroyAllWindows()  # Close any open windows
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        import traceback
+        traceback.print_exc()
+        cv2.destroyAllWindows()  # Close any open windows
     finally:
         # Clean up
-        if args.display:
-            cv2.destroyAllWindows()
-        picam2.stop()
-        print("Camera stopped and resources released")
+        try:
+            picam2.stop()
+            print("Camera stopped and resources released")
+        except:
+            pass
