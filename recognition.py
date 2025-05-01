@@ -149,16 +149,37 @@ if __name__ == "__main__":
     # Initialize the Picamera2 object
     picam2 = Picamera2()
     
-    # Configure the camera
-    camera_config = picam2.create_preview_configuration(
-        main={"size": imx500.get_output_size()},
-        transform=imx500.get_transform(),
-        buffer_count=4
-    )
-    picam2.configure(camera_config)
-    
-    # Set up camera metadata
-    picam2.post_callback = imx500.post_callback
+    # Configure the camera with proper error handling
+    try:
+        # Get the input size for the camera configuration
+        input_size = imx500.get_input_size()
+        print(f"Camera input size: {input_size}")
+        
+        # Check if get_transform exists
+        transform = None
+        if hasattr(imx500, 'get_transform'):
+            transform = imx500.get_transform()
+        
+        # Create the camera configuration
+        camera_config = picam2.create_preview_configuration(
+            main={"size": input_size},
+            transform=transform,
+            buffer_count=4
+        )
+        picam2.configure(camera_config)
+        
+        # Set up camera metadata
+        if hasattr(imx500, 'post_callback'):
+            picam2.post_callback = imx500.post_callback
+        else:
+            print("Warning: imx500.post_callback not found, skipping this step")
+    except Exception as e:
+        print(f"Error configuring camera: {e}")
+        # Fallback configuration if the specialized configuration fails
+        print("Attempting to use default camera configuration...")
+        default_config = picam2.create_preview_configuration()
+        picam2.configure(default_config)
+        print("Using default camera configuration.")
     
     # Start the camera
     picam2.start()
