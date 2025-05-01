@@ -274,6 +274,31 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Error initializing IMX500: {e}")
         sys.exit(1)
+        
+    # Check for labels.txt file in the same directory as the model
+    model_dir = os.path.dirname(model) if os.path.dirname(model) else "."
+    labels_file = os.path.join(model_dir, "labels.txt")
+    print(f"Looking for labels file at: {labels_file}")
+    
+    if os.path.exists(labels_file):
+        try:
+            with open(labels_file, 'r') as f:
+                custom_labels = [line.strip() for line in f.readlines()]
+            
+            print(f"Found {len(custom_labels)} labels in {labels_file}: {custom_labels}")
+            
+            # Set labels in intrinsics
+            intrinsics.labels = custom_labels
+        except Exception as e:
+            print(f"Error reading labels file: {e}")
+    else:
+        print(f"Labels file not found at {labels_file}, using default labels")
+        # If no labels file, check if intrinsics already has labels
+        if not hasattr(intrinsics, 'labels') or not intrinsics.labels:
+            # Set a default label for car detection if not already set
+            intrinsics.labels = ["car"]
+            print("Set default label to 'car'")
+
 
     # Initialize the Picamera2 object
     picam2 = Picamera2()
